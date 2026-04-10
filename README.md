@@ -74,11 +74,13 @@ apt-get install -y chromium chromium-sandbox
     -   有了 `GH_SESSION` 后，脚本会自动跳过密码和 2FA 验证，实现静默登录和保活。
 
 
-# 创建 Telegram 机器人 在 Telegram 搜索 @BotFather，发送 /newbot 创建机器人。
+📱 Telegram配置获取
 
-# 设置名字和用户名（用户名需以 bot 结尾）。 获取 Token，填入 TG\_BOT\_TOKEN。
+创建机器人: 与 @BotFather 对话，发送 /newbot 创建机器人
 
-# 获取 Chat ID：私聊应用机器人，@KinhRoBot, 使用/id 命令
+获取Token: 创建完成后会收到 TG\_BOT\_TOKEN
+
+获取用户ID: 与 @userinfobot 对话获取 TG\_USER\_ID
 
 ## ❓ 常见问题 (FAQ)
 
