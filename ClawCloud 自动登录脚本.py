@@ -1,10 +1,10 @@
 """
-ClawCloud 自动登录脚本 (青龙面板全平台通用版 - 手动更新变量)
+ClawCloud 自动登录脚本 (青龙面板全平台通用版 - 强化排错版)
 - 自动检测区域跳转
 - 等待设备验证批准（30秒）
-- 支持 Telegram 对接 2FA 验证码输入
-- 每次登录后在日志和TG输出完整 Cookie，供手动更新
+- 每次登录后在日志、TG 和 Bark 输出完整 Cookie，供手动更新
 - 智能适配浏览器内核 (Alpine / Debian / Playwright 默认)
+- Bark GET 请求版稳定推送
 """
 
 import os
@@ -12,7 +12,8 @@ import random
 import re
 import sys
 import time
-from urllib.parse import urlparse
+import urllib.parse
+import traceback
 
 import requests
 from playwright.sync_api import sync_playwright
@@ -23,6 +24,41 @@ LOGIN_ENTRY_URL = "https://console.run.claw.cloud/login"
 SIGNIN_URL = f"{LOGIN_ENTRY_URL}/signin"
 DEVICE_VERIFY_WAIT = 30  
 TWO_FACTOR_WAIT = int(os.environ.get("TWO_FACTOR_WAIT", "120"))  
+
+# ==================== Bark 配置 ====================
+# 【在此修改你的 Bark 密钥】
+# 请保留双引号！例如："YOUR_KEY_HERE"
+BARK_KEY = "你的Bark密钥写在这里" 
+# 如果你使用的是官方服务器，保持默认即可；如果是自建服务器，请修改这里的 URL
+BARK_SERVER = "https://api.day.app" 
+
+
+class Bark:
+    """Bark 通知 (纯 GET 请求，带强化 URL 编码)"""
+    def __init__(self):
+        # 强制转换为字符串，防止小白不小心填成数字导致报错
+        self.key = str(BARK_KEY).strip()
+        self.server = str(BARK_SERVER).strip().rstrip('/')
+        self.ok = bool(self.key and self.key != "你的Bark密钥写在这里")
+        
+        if self.ok:
+            print(f"✅ 成功加载 Bark 配置 (Server: {self.server})")
+
+    def send(self, title, body, group="ClawCloud"):
+        """发送 GET 请求推送"""
+        if not self.ok: return
+        try:
+            safe_title = urllib.parse.quote(title, safe='')
+            safe_body = urllib.parse.quote(body, safe='')
+            safe_group = urllib.parse.quote(group, safe='')
+            
+            url = f"{self.server}/{self.key}/{safe_title}/{safe_body}?group={safe_group}&copy={safe_body}"
+            
+            res = requests.get(url, timeout=15)
+            if res.status_code != 200:
+                print(f"⚠️ Bark 推送响应异常: HTTP {res.status_code} - {res.text}")
+        except Exception as e:
+            print(f"❌ Bark 请求代码执行异常: {e}")
 
 
 class Telegram:
@@ -106,6 +142,7 @@ class AutoLogin:
         self.password = os.environ.get('GH_PASSWORD')
         self.gh_session = os.environ.get('GH_SESSION', '').strip()
         self.tg = Telegram()
+        self.bark = Bark() 
         self.shots = []
         self.logs = []
         self.n = 0
@@ -192,12 +229,15 @@ class AutoLogin:
         
         self.log("已在日志中输出完整 Cookie", "SUCCESS")
         self.tg.send(f"🔑 <b>新 Cookie 获取成功</b>\n\n请手动更新青龙变量 <b>GH_SESSION</b>:\n<code>{value}</code>")
+        self.bark.send("🔑 新 Cookie 获取成功", f"请去青龙面板手动更新 GH_SESSION 变量:\n{value}")
     
     def wait_device(self, page):
         self.log(f"需要设备验证，等待 {DEVICE_VERIFY_WAIT} 秒...", "WARN")
         self.shot(page, "设备验证")
         
         self.tg.send(f"⚠️ <b>需要设备验证</b>\n\n请在 {DEVICE_VERIFY_WAIT} 秒内批准：\n1️⃣ 检查邮箱点击链接\n2️⃣ 或在 GitHub App 批准")
+        self.bark.send("⚠️ 紧急：需要设备验证", f"请在 {DEVICE_VERIFY_WAIT} 秒内检查邮箱或 GitHub App 批准！")
+        
         if self.shots: self.tg.photo(self.shots[-1], "设备验证页面")
         
         for i in range(DEVICE_VERIFY_WAIT):
@@ -207,6 +247,7 @@ class AutoLogin:
             if 'verified-device' not in page.url and 'device-verification' not in page.url:
                 self.log("设备验证通过！", "SUCCESS")
                 self.tg.send("✅ <b>设备验证通过</b>")
+                self.bark.send("✅ 验证通过", "设备验证已批准")
                 return True
             try:
                 page.reload(timeout=10000)
@@ -221,6 +262,8 @@ class AutoLogin:
         self.log(f"需要两步验证（GitHub Mobile），等待 {TWO_FACTOR_WAIT} 秒...", "WARN")
         shot = self.shot(page, "两步验证_mobile")
         self.tg.send(f"⚠️ <b>需要两步验证（GitHub Mobile）</b>\n\n请打开手机 GitHub App 批准本次登录（会让你确认一个数字）。\n等待时间：{TWO_FACTOR_WAIT} 秒")
+        self.bark.send("⚠️ 紧急：需要两步验证", f"请打开手机 GitHub App 批准登录，需要在 {TWO_FACTOR_WAIT} 秒内完成。")
+        
         if shot: self.tg.photo(shot, "两步验证页面（数字在图里）")
         
         for i in range(TWO_FACTOR_WAIT):
@@ -229,6 +272,7 @@ class AutoLogin:
             if "github.com/sessions/two-factor/" not in url:
                 self.log("两步验证通过！", "SUCCESS")
                 self.tg.send("✅ <b>两步验证通过</b>")
+                self.bark.send("✅ 验证通过", "两步验证已完成")
                 return True
             if "github.com/login" in url:
                 return False
@@ -284,6 +328,8 @@ class AutoLogin:
         except: pass
 
         self.tg.send(f"🔐 <b>需要验证码登录</b>\n\n用户{self.username}正在登录，请在 Telegram 里发送：\n<code>/code 你的6位验证码</code>\n\n等待时间：{TWO_FACTOR_WAIT} 秒")
+        self.bark.send("🔐 需要验证码", "正在触发 2FA，请前往 Telegram Bot 倒计时内回复验证码。")
+        
         if shot: self.tg.photo(shot, "两步验证页面")
 
         self.log(f"等待验证码（{TWO_FACTOR_WAIT}秒）...", "WARN")
@@ -431,22 +477,36 @@ class AutoLogin:
             except: pass
     
     def notify(self, ok, err=""):
-        if not self.tg.ok: return
-        region_info = f"\n<b>区域:</b> {self.detected_region or '默认'}" if self.detected_region else ""
-        msg = f"<b>🤖 ClawCloud 自动登录</b>\n\n<b>状态:</b> {'✅ 成功' if ok else '❌ 失败'}\n<b>用户:</b> {self.username}{region_info}\n<b>时间:</b> {time.strftime('%Y-%m-%d %H:%M:%S')}"
-        if err: msg += f"\n<b>错误:</b> {err}"
-        msg += "\n\n<b>日志:</b>\n" + "\n".join(self.logs[-6:])
-        self.tg.send(msg)
+        if self.tg.ok:
+            region_info = f"\n<b>区域:</b> {self.detected_region or '默认'}" if self.detected_region else ""
+            msg = f"<b>🤖 ClawCloud 自动登录</b>\n\n<b>状态:</b> {'✅ 成功' if ok else '❌ 失败'}\n<b>用户:</b> {self.username}{region_info}\n<b>时间:</b> {time.strftime('%Y-%m-%d %H:%M:%S')}"
+            if err: msg += f"\n<b>错误:</b> {err}"
+            msg += "\n\n<b>日志:</b>\n" + "\n".join(self.logs[-6:])
+            self.tg.send(msg)
+            
+            if self.shots:
+                if not ok:
+                    for s in self.shots[-3:]: self.tg.photo(s, s)
+                else:
+                    self.tg.photo(self.shots[-1], "完成")
         
-        if self.shots:
-            if not ok:
-                for s in self.shots[-3:]: self.tg.photo(s, s)
-            else:
-                self.tg.photo(self.shots[-1], "完成")
+        if self.bark.ok:
+            status_str = "✅ 成功" if ok else "❌ 失败"
+            title = f"🤖 ClawCloud {status_str}"
+            region_info = f" ({self.detected_region})" if self.detected_region else ""
+            body = f"用户: {self.username}{region_info}\n"
+            if err: body += f"错误: {err}\n"
+            if self.logs:
+                body += "最新日志: " + " | ".join(self.logs[-2:])
+            self.bark.send(title, body)
     
     def run(self):
+        print("\n" + "="*50)
+        print("🚀 ClawCloud 自动登录引擎已启动")
+        print("="*50 + "\n")
+        
         if not self.username or not self.password:
-            print("❌ 缺少 GitHub 凭据配置 (GH_USERNAME, GH_PASSWORD)！")
+            print("❌ 致命错误: 未配置 GH_USERNAME 和 GH_PASSWORD 环境变量！")
             self.notify(False, "凭据未配置")
             sys.exit(1)
             
@@ -463,10 +523,9 @@ class AutoLogin:
                 ]
             }
 
-            # 智能检测浏览器内核路径
             possible_paths = [
-                '/usr/bin/chromium-browser',  # Alpine 默认
-                '/usr/bin/chromium'           # Debian 默认
+                '/usr/bin/chromium-browser', 
+                '/usr/bin/chromium'           
             ]
             for path in possible_paths:
                 if os.path.exists(path):
@@ -500,7 +559,6 @@ class AutoLogin:
             )
             page = context.new_page()
             
-            # 反屏蔽注入
             page.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
                 Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
@@ -567,5 +625,12 @@ class AutoLogin:
             finally:
                 browser.close()
 
+# 确保这块代码完整复制，这是脚本的启动引擎！
 if __name__ == "__main__":
-    AutoLogin().run()
+    try:
+        print("⏳ [系统环境] 正在加载模块，准备启动...")
+        AutoLogin().run()
+    except Exception as fatal_e:
+        print("\n❌ [致命崩溃] 脚本遇到未捕获的异常，导致无法运行：")
+        traceback.print_exc()
+        sys.exit(1)
