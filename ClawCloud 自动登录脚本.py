@@ -1,10 +1,11 @@
 """
-ClawCloud 自动登录脚本 (青龙面板全平台通用版 - 强化排错版)
+ClawCloud 自动登录脚本 (青龙面板全平台通用版 - 终极优化版)
 - 自动检测区域跳转
 - 等待设备验证批准（30秒）
 - 每次登录后在日志、TG 和 Bark 输出完整 Cookie，供手动更新
 - 智能适配浏览器内核 (Alpine / Debian / Playwright 默认)
-- Bark GET 请求版稳定推送
+- Bark 增强版：支持环境变量配置、GET请求、UA伪装抗拦截、详细调试日志
+- 核心修复：Bark强制去除代理直连，根除 SSL 握手失败报错
 """
 
 import os
@@ -16,6 +17,10 @@ import urllib.parse
 import traceback
 
 import requests
+import urllib3
+# 禁用 SSL 警告
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 from playwright.sync_api import sync_playwright
 
 # ==================== 配置 ====================
@@ -25,48 +30,67 @@ SIGNIN_URL = f"{LOGIN_ENTRY_URL}/signin"
 DEVICE_VERIFY_WAIT = 30  
 TWO_FACTOR_WAIT = int(os.environ.get("TWO_FACTOR_WAIT", "120"))  
 
+# ==================== 网络请求配置 ====================
+# 为 requests 库配置全局代理，绕过国内机器的阻断
+REQ_PROXIES = {"http": PROXY_DSN, "https": PROXY_DSN} if PROXY_DSN else None
+# 突破 Cloudflare/GFW 拦截的核心：伪装成普通浏览器
+REQ_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+
 # ==================== Bark 配置 ====================
-# 【在此修改你的 Bark 密钥】
+# 支持青龙环境变量 BARK_KEY，如果没配，才会读取这里的内部配置
 # 请保留双引号！例如："YOUR_KEY_HERE"
-BARK_KEY = "你的Bark密钥写在这里" 
-# 如果你使用的是官方服务器，保持默认即可；如果是自建服务器，请修改这里的 URL
+INTERNAL_BARK_KEY = "你的Bark密钥写在这里" 
 BARK_SERVER = "https://api.day.app" 
 
 
 class Bark:
-    """Bark 通知 (纯 GET 请求，带强化 URL 编码)"""
+    """Bark 通知 (纯 GET 请求，带强化 URL 编码、强制直连防代理握手失败)"""
     def __init__(self):
-        # 强制转换为字符串，防止小白不小心填成数字导致报错
-        self.key = str(BARK_KEY).strip()
+        # 优先读取环境变量，其次读取内部变量
+        env_key = os.environ.get("BARK_KEY", "").strip()
+        self.key = env_key if env_key else str(INTERNAL_BARK_KEY).strip()
         self.server = str(BARK_SERVER).strip().rstrip('/')
-        self.ok = bool(self.key and self.key != "你的Bark密钥写在这里")
+        
+        # 判断密钥是否有效 (不为空，且不包含中文占位符)
+        self.ok = bool(self.key and "你的Bark" not in self.key)
         
         if self.ok:
             print(f"✅ 成功加载 Bark 配置 (Server: {self.server})")
+        else:
+            print("⚠️ Bark 密钥未配置 (内部为空或未配置 BARK_KEY 环境变量)，推送已跳过。")
 
     def send(self, title, body, group="ClawCloud"):
         """发送 GET 请求推送"""
         if not self.ok: return
+        
+        print(f"🔄 正在向 Bark 发送推送: [{title}] ...")
         try:
             safe_title = urllib.parse.quote(title, safe='')
             safe_body = urllib.parse.quote(body, safe='')
             safe_group = urllib.parse.quote(group, safe='')
             
+            # 拼接 GET 请求 URL
             url = f"{self.server}/{self.key}/{safe_title}/{safe_body}?group={safe_group}&copy={safe_body}"
             
-            res = requests.get(url, timeout=15)
-            if res.status_code != 200:
-                print(f"⚠️ Bark 推送响应异常: HTTP {res.status_code} - {res.text}")
+            # 【核心修改】：去掉了 proxies=REQ_PROXIES，让 Bark 强制直连！并增加 verify=False
+            res = requests.get(url, headers=REQ_HEADERS, verify=False, timeout=15)
+            if res.status_code == 200:
+                print("✅ Bark 推送成功！")
+            else:
+                print(f"⚠️ Bark 推送失败: HTTP {res.status_code} - {res.text}")
         except Exception as e:
-            print(f"❌ Bark 请求代码执行异常: {e}")
+            print(f"❌ Bark 网络请求异常: {e}")
+            print("💡 诊断提示: 如果持续失败，请检查服务器是否能直连访问 api.day.app")
 
 
 class Telegram:
     """Telegram 通知"""
     def __init__(self):
-        self.token = os.environ.get('TG_BOT_TOKEN')
-        self.chat_id = os.environ.get('TG_CHAT_ID')
+        self.token = os.environ.get('TG_BOT_TOKEN', '').strip()
+        self.chat_id = os.environ.get('TG_CHAT_ID', '').strip()
         self.ok = bool(self.token and self.chat_id)
+        if self.ok:
+            print("✅ 成功加载 Telegram 配置")
     
     def send(self, msg):
         if not self.ok: return
@@ -74,6 +98,9 @@ class Telegram:
             requests.post(
                 f"https://api.telegram.org/bot{self.token}/sendMessage",
                 data={"chat_id": self.chat_id, "text": msg, "parse_mode": "HTML"},
+                headers=REQ_HEADERS,
+                proxies=REQ_PROXIES,
+                verify=False,
                 timeout=30
             )
         except: pass
@@ -86,6 +113,9 @@ class Telegram:
                     f"https://api.telegram.org/bot{self.token}/sendPhoto",
                     data={"chat_id": self.chat_id, "caption": caption[:1024]},
                     files={"photo": f},
+                    headers=REQ_HEADERS,
+                    proxies=REQ_PROXIES,
+                    verify=False,
                     timeout=60
                 )
         except: pass
@@ -96,6 +126,9 @@ class Telegram:
             r = requests.get(
                 f"https://api.telegram.org/bot{self.token}/getUpdates",
                 params={"timeout": 0},
+                headers=REQ_HEADERS,
+                proxies=REQ_PROXIES,
+                verify=False,
                 timeout=10
             )
             data = r.json()
@@ -115,6 +148,9 @@ class Telegram:
                 r = requests.get(
                     f"https://api.telegram.org/bot{self.token}/getUpdates",
                     params={"timeout": 20, "offset": offset},
+                    headers=REQ_HEADERS,
+                    proxies=REQ_PROXIES,
+                    verify=False,
                     timeout=30
                 )
                 data = r.json()
@@ -181,7 +217,7 @@ class AutoLogin:
     
     def detect_region(self, url):
         try:
-            parsed = urlparse(url)
+            parsed = urllib.parse.urlparse(url)
             host = parsed.netloc
             if host.endswith('.console.claw.cloud'):
                 region = host.replace('.console.claw.cloud', '')
@@ -229,7 +265,8 @@ class AutoLogin:
         
         self.log("已在日志中输出完整 Cookie", "SUCCESS")
         self.tg.send(f"🔑 <b>新 Cookie 获取成功</b>\n\n请手动更新青龙变量 <b>GH_SESSION</b>:\n<code>{value}</code>")
-        self.bark.send("🔑 新 Cookie 获取成功", f"请去青龙面板手动更新 GH_SESSION 变量:\n{value}")
+        # 推送内容带有新Cookie
+        self.bark.send("🔑 新 Cookie 获取成功", f"请去青龙面板手动更新 GH_SESSION 变量:\n\n{value}")
     
     def wait_device(self, page):
         self.log(f"需要设备验证，等待 {DEVICE_VERIFY_WAIT} 秒...", "WARN")
@@ -477,9 +514,14 @@ class AutoLogin:
             except: pass
     
     def notify(self, ok, err=""):
+        # =================================================
+        # == 把原本的“✅ 成功”修改为“✅ 登录与保活成功” ==
+        # =================================================
+        status_str = "✅ 登录与保活成功" if ok else "❌ 执行失败"
+        
         if self.tg.ok:
             region_info = f"\n<b>区域:</b> {self.detected_region or '默认'}" if self.detected_region else ""
-            msg = f"<b>🤖 ClawCloud 自动登录</b>\n\n<b>状态:</b> {'✅ 成功' if ok else '❌ 失败'}\n<b>用户:</b> {self.username}{region_info}\n<b>时间:</b> {time.strftime('%Y-%m-%d %H:%M:%S')}"
+            msg = f"<b>🤖 ClawCloud 任务报告</b>\n\n<b>状态:</b> {status_str}\n<b>用户:</b> {self.username}{region_info}\n<b>时间:</b> {time.strftime('%Y-%m-%d %H:%M:%S')}"
             if err: msg += f"\n<b>错误:</b> {err}"
             msg += "\n\n<b>日志:</b>\n" + "\n".join(self.logs[-6:])
             self.tg.send(msg)
@@ -491,13 +533,13 @@ class AutoLogin:
                     self.tg.photo(self.shots[-1], "完成")
         
         if self.bark.ok:
-            status_str = "✅ 成功" if ok else "❌ 失败"
             title = f"🤖 ClawCloud {status_str}"
             region_info = f" ({self.detected_region})" if self.detected_region else ""
             body = f"用户: {self.username}{region_info}\n"
             if err: body += f"错误: {err}\n"
             if self.logs:
-                body += "最新日志: " + " | ".join(self.logs[-2:])
+                # 只截取最后两行日志，防止 URL 超长
+                body += "执行日志: " + " | ".join(self.logs[-2:])
             self.bark.send(title, body)
     
     def run(self):
@@ -534,7 +576,7 @@ class AutoLogin:
 
             if PROXY_DSN:
                 try:
-                    p_url = urlparse(PROXY_DSN)
+                    p_url = urllib.parse.urlparse(PROXY_DSN)
                     proxy_config = {"server": f"{p_url.scheme}://{p_url.hostname}:{p_url.port}"}
                     if p_url.username: proxy_config["username"] = p_url.username
                     if p_url.password: proxy_config["password"] = p_url.password
@@ -625,7 +667,6 @@ class AutoLogin:
             finally:
                 browser.close()
 
-# 确保这块代码完整复制，这是脚本的启动引擎！
 if __name__ == "__main__":
     try:
         print("⏳ [系统环境] 正在加载模块，准备启动...")
